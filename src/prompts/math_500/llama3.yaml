@@ -1,0 +1,10 @@
+- name: "vanilla_instruct"
+  description: "No COT, No few-shot examples, just plain simple prompt to use with instruct model"
+  prompt: |
+    <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nSolve the given math problem.<|eot_id|><|start_header_id|>user<|end_header_id|>\n
+    {problem}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n
+
+- name: "vanilla_base"
+  description: "No few-shot examples, just plain simple prompt to use with base model"
+  prompt: |
+    {problem}
