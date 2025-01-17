@@ -1,2 +1,2 @@
-# llm_inference_boilerplate_code
+# LLM Inference Boilerplate Code
 Quick start for new LLM-inference project
