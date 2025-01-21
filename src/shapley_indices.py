@@ -9,6 +9,7 @@ from transformers_utils import IntervenableTransformers
 import pickle
 from functools import wraps
 import time 
+from utils import time_decorator
 
 __all__ = [
     'shapley_taylor_indices',
@@ -84,17 +85,6 @@ def wet_fn_wrapper(T: frozenset, cpn_dict: dict, masked_payoffs: list):
             ret += masked_payoffs[idx]
 
     return ret
-
-def time_decorator(func):
-    @wraps(func)  # This preserves the original function's metadata (e.g., name, docstring)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()  # Record the start time
-        result = func(*args, **kwargs)  # Execute the wrapped function
-        end_time = time.time()  # Record the end time
-        elapsed_time = end_time - start_time  # Calculate the elapsed time
-        print(f"Function '{func.__name__}' executed in {elapsed_time:.6f} seconds.")
-        return result  # Return the result of the wrapped function
-    return wrapper
 
 def shapley_taylor_indices(num_players, fn, ord=2, num_samples=500, random_state=None, return_indices=True):
     rng = check_random_state(random_state)

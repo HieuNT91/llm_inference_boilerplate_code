@@ -4,28 +4,7 @@ from typing import Union, List, Dict
 import torch 
 import numpy as np
 from collections import defaultdict
-
-
-def count_decorator(func):
-    """
-    A decorator to count how many times a function has been called.
-    """
-    def wrapper(*args, **kwargs):
-        wrapper.call_count += 1
-        return func(*args, **kwargs)
-
-    wrapper.call_count = 0
-
-    def reset_count():
-        wrapper.call_count = 0
-
-    def print_calls():
-        print(f"{func.__name__} has been called {wrapper.call_count} time(s).")
-
-    wrapper.reset_count = reset_count
-    wrapper.print_calls = print_calls
-    return wrapper
-
+from utils import count_decorator
 
 class BaseHooker:
     def __init__(self, layer_list: List[int], stat_track: bool = True) -> None:
@@ -47,6 +26,7 @@ class BaseHooker:
             print(f"Layer {layer_idx}:")
             print(f"Mean: {np.mean(means, axis=0)}")
             print(f"Variance: {np.mean(variances, axis=0)}")
+            print(f"Norm: {np.mean(stats['norm'], axis=0)}")
             print()
             
     def get_stats(self):

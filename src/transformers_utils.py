@@ -10,7 +10,7 @@ import transformers
 from functools import partial
 import numpy as np
 from hooker import BaseHooker, ZeroOutHooker
-
+from utils import count_decorator, time_decorator
 
 class InferenceTransformers:
     def __init__(self, model_repo: str, config: Dict = None, use_auto_model: bool = True):
@@ -87,6 +87,7 @@ class InferenceTransformers:
         else:
             raise ValueError(f"Invalid input type {type(inputs)}. Must be str, list of str, or dict.")
         
+        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
         output = self.model.generate(
             **model_inputs,
             max_new_tokens=config.get("max_new_tokens", 50),
@@ -120,6 +121,7 @@ class InferenceTransformers:
         else:
             raise ValueError(f"Invalid input type {type(inputs)}. Must be str, list of str, or dict.")
         
+        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
         output = self.model(**model_inputs)
         return output
 
@@ -155,6 +157,7 @@ class IntervenableTransformers(InferenceTransformers):
         super().__init__(model_repo, config, use_auto_model)
     
     @torch.no_grad()
+    @time_decorator
     def generate(
         self,
         inputs: Union[str, List[str], Dict],
@@ -162,6 +165,7 @@ class IntervenableTransformers(InferenceTransformers):
         return_raw_output: bool = False,
         heads_to_prune: List[int] = [3],
         layers_to_prune: List[int] = [3],
+        stat_track: bool = True,
     ):
         
         if config is None:
@@ -176,9 +180,10 @@ class IntervenableTransformers(InferenceTransformers):
         else:
             raise ValueError(f"Invalid input type {type(inputs)}. Must be str, list of str, or dict.")
         
+        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
         attention_hooker = ZeroOutHooker(head_indices=heads_to_prune, 
                                          layer_list=layers_to_prune, 
-                                         stat_track=False)
+                                         stat_track=stat_track)
         
         output = self.model.generate(
             **model_inputs,
@@ -220,6 +225,7 @@ class IntervenableTransformers(InferenceTransformers):
         else:
             raise ValueError(f"Invalid input type {type(inputs)}. Must be str, list of str, or dict.")
         
+        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
         attention_hooker = ZeroOutHooker(head_indices=heads_to_prune, 
                                          layer_list=layers_to_prune,
                                          stat_track=stat_track)
@@ -229,6 +235,7 @@ class IntervenableTransformers(InferenceTransformers):
                             use_cache=False)
         output.logits = output.logits.to('cpu')
         attention_hooker.__call__.print_calls()
+        attention_hooker.__call__.reset_count()
         self.stats = attention_hooker.get_stats()
         # attention_hooker.print_stats()
         return output
@@ -247,9 +254,9 @@ if __name__ == '__main__':
     import pickle
     import os 
     os.makedirs("tmp", exist_ok=True)
-    model_repo = "Qwen/Qwen2.5-Math-1.5B-Instruct"
+    model_repo = "Qwen/Qwen2.5-Math-7B-Instruct"
     data_path = f"../notebook/tmp/{model_repo.replace('/', '_')}_generated_outputs_1batch.pkl"
-    data_path = data_path.replace("1.5B", "7B")
+    # data_path = data_path.replace("1.5B", "7B")
     with open(data_path, "rb") as in_f:
         attention_data_base = pickle.load(in_f)
     
@@ -259,10 +266,18 @@ if __name__ == '__main__':
                                                    use_auto_model=False)
     
     default_config = InferenceTransformers.load_config('config/default_generation_config.json')
-    output = inference_transformers.forward(inputs=attention_data_base,
-                                            heads_to_prune=[3],
-                                            layers_to_prune=[3], 
-                                            stat_track=True)
+    
+    model_inputs = inference_transformers.generate(attention_data_base, 
+                                                   return_raw_output=False,
+                                                   heads_to_prune=[],
+                                                   layers_to_prune=[],)
+    print(model_inputs)
+    from grading import grader 
+    
+    # output = inference_transformers.forward(inputs=attention_data_base,
+    #                                         heads_to_prune=[3],
+    #                                         layers_to_prune=[3], 
+    #                                         stat_track=True)
     # output = inference_transformers.get_attention_at_layers(inputs=attention_data_base, layers_to_prune=[3])
     
     # print(output)
