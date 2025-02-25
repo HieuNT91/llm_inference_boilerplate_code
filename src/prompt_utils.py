@@ -51,6 +51,7 @@ def get_prompt(all_prompts, task_name, model_name, prompt_name):
     return all_prompts[task_name][model_name][prompt_name]
 
 if __name__ == "__main__":
-    all_prompts = load_all_prompts("prompts")
-    prompt = get_prompt(all_prompts, "math_500", "llama3", "vanilla_instruct")
+    all_prompts = load_all_prompts("src/prompts")
+    prompt = get_prompt(all_prompts, "math_500", "qwen_math", "vanilla_instruct")
+    breakpoint()
     print(prompt)
