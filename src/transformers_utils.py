@@ -25,7 +25,7 @@ class InferenceTransformers:
         self.is_distributed_generation = use_accelerate
         
         self.model_name = model_repo.split('/')[-1]
-        self.default_generation_config_path = "src/config/default_generation_config.json"
+        self.default_generation_config_path = "config/default_generation_config.json"
         if config is not None:
             self.config = config
         else:
@@ -74,7 +74,7 @@ class InferenceTransformers:
                                                             attn_implementation=attention_implementation)
         else:
             if 'qwen' in model_repo.lower():
-                from .mod_llm.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+                from mod_llm.qwen2.modeling_qwen2 import Qwen2ForCausalLM
                 self.model = Qwen2ForCausalLM.from_pretrained(model_repo, 
                                                         torch_dtype=torch.float16, 
                                                         device_map='auto' if not use_accelerate else self.distributed_state.device,
@@ -87,12 +87,12 @@ class InferenceTransformers:
                                 is_trainable=False,
                             )
                 
-            elif 'gemma' in model_repo.lower():
-                from .mod_llm.gemma2.modeling_gemma2 import GemmaForCausalLM
-                self.model = GemmaForCausalLM.from_pretrained(model_repo, 
-                                                        torch_dtype=torch.float16, 
-                                                        device_map='auto' if not use_accelerate else self.distributed_state.device,
-                                                        attn_implementation=attention_implementation)
+            # elif 'gemma' in model_repo.lower():
+            #     from .mod_llm.gemma2.modeling_gemma2 import GemmaForCausalLM
+            #     self.model = GemmaForCausalLM.from_pretrained(model_repo, 
+            #                                             torch_dtype=torch.float16, 
+            #                                             device_map='auto' if not use_accelerate else self.distributed_state.device,
+            #                                             attn_implementation=attention_implementation)
             else:
                 raise ValueError(f"Model {model_repo} not supported. or set use_auto_model=True instead")
         
@@ -137,7 +137,15 @@ class InferenceTransformers:
         
         if isinstance(inputs, list) and all(isinstance(x, str) for x in inputs):
             # Tokenize a list of strings with padding
-            model_inputs = self.tokenizer(inputs, padding=True, return_tensors="pt")
+            # model_inputs = self.tokenizer(inputs, padding=True, return_tensors="pt")
+            batch_size_per_device = self.config.get('batch_size_per_device')
+            cache_interval = self.config.get('cache_interval')
+            formatted_prompts = [inputs[i : i + batch_size_per_device] for i in range(0, len(inputs), batch_size_per_device)]
+            model_inputs =[self.tokenizer(formatted_prompt, padding=True, return_tensors='pt')
+                            for formatted_prompt in formatted_prompts]
+            cache_interval_ = cache_interval if not self.is_distributed_generation else cache_interval * self.distributed_state.num_processes
+            split_model_inputs = [model_inputs[i : i + cache_interval_] for i in range(0, len(model_inputs), cache_interval_)]
+            return split_model_inputs
         else:
             if self.is_distributed_generation:
                 raise ValueError(f"Only accept list of str for distributed generation.")
@@ -165,75 +173,132 @@ class InferenceTransformers:
         Raises:
             KeyError: If a required parameter is missing in kwargs.
         """
-        # Define the list of required parameters
-        required_keys = [
-            "max_length",
-            "min_length",
+        required_keys = [ # TODO: Modify this as you changed the config
             "temperature",
+            "max_new_tokens"
             "top_k",
             "top_p",
-            "num_beams",
             "repetition_penalty",
             "do_sample",
-            "early_stopping",
             "use_cache",
+            "num_return_sequences",
         ]
 
-        # Ensure all required keys are present in kwargs
         for key in required_keys:
             if key not in kwargs:
                 raise KeyError(f"Missing required generation parameter: '{key}'")
         
-        # Build the generation configuration dictionary
         generation_config = {key: kwargs[key] for key in required_keys}
         generation_config["pad_token_id"] = kwargs.get("pad_token_id", self.tokenizer.pad_token_id)
         generation_config["bos_token_id"] = kwargs.get("bos_token_id", self.tokenizer.bos_token_id)
         generation_config["eos_token_id"] = kwargs.get("eos_token_id", self.tokenizer.eos_token_id)
         return generation_config
     
+    def cache_inputs_outputs(self, inputs, outputs, group_tag, cache_path):
+        
+        os.makedirs(cache_path, exist_ok=True)
+        file_path = os.path.join(cache_path, f"{group_tag}_cache.json")
+        num_return_sequences = self.config.get("num_return_sequences", 1)
+        grouped_outputs = [
+            outputs[i : i + num_return_sequences] for i in range(0, len(outputs), num_return_sequences)
+        ]
+        group_data = [
+            {"input": inp, "output": out} for inp, out in zip(inputs, grouped_outputs)
+        ]
+        with open(file_path, "w") as file:
+            json.dump(group_data, file, indent=4)
 
+        print(f"Cached inputs and outputs for group '{group_tag}' saved to {cache_path}.")
+    
+    @staticmethod
+    def load_cached_outputs(cache_path, group_tag):
+        file_path = os.path.join(cache_path, f"{group_tag}_cache.json")
+        if os.path.exists(file_path):
+            with open(file_path, "r") as file:
+                cached_data = json.load(file)
+            # Extract only the outputs from the cached data
+            return [entry["output"] for entry in cached_data]
+        return None
+    
     def generate_non_distributed(
         self,
         inputs: Union[str, List[str], Dict],
-        return_raw_output: bool = False,
-    ):
-        
+        cache_path: str,
+    ) -> List[str]:
+        """
+        Generates model outputs for the given inputs, using caching to skip regeneration
+        for already-processed inputs.
+
+        Args:
+            cache_path (str): Path to the directory where cached outputs are stored.
+            inputs (Union[str, List[str], Dict]): Input text(s) or tokenized inputs for generation.
+
+        Returns:
+            List[str]: Generated outputs (decoded).
+        """
+        # Prepare generation configuration and inputs
         generation_config = self.prepare_config_for_generation(**self.config)
         model_inputs = self.prepare_inputs_for_generation(inputs)
-        seq_len = model_inputs['input_ids'].shape[1]
-        
-        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
-        output = self.model.generate(
-            **model_inputs,
-            **generation_config,
-        )
-        
-        if return_raw_output:
-            return output
-        else:
-            response = self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True)
-            return response
+
+        # Handle single input (not a list) case
+        if not isinstance(model_inputs, list):
+            model_inputs = {k: v.to(self.device) for k, v in model_inputs.items()}
+            seq_len = model_inputs['input_ids'].shape[1]
+            output = self.model.generate(
+                **model_inputs,
+                **generation_config,
+            )
+            return self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True)
+
+        # Handle grouped inputs (list of batches)
+        outputs = []
+        for group_tag, input_batches in enumerate(model_inputs):
+            group_tag_str = f"group_{group_tag}"  # Unique cache identifier for the group
+
+            # Check if outputs for this group are already cached
+            cached_outputs = self.load_cached_outputs(cache_path, group_tag_str)
+            if cached_outputs is not None:
+                print(f"Loaded cached outputs for {group_tag_str}.")
+                outputs.extend(cached_outputs)
+                continue  # Skip generation for this group
+
+            group_outputs = []
+            inputs_to_cache = []
+            for batch in input_batches:
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                seq_len = batch['input_ids'].shape[1]
+                output = self.model.generate(
+                    **batch,
+                    **generation_config,
+                )
+                inputs_to_cache.extend(self.tokenizer.batch_decode(batch['input_ids'], skip_special_tokens=True))
+                group_outputs.extend(self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True))
+
+            outputs.extend(group_outputs)
+            self.cache_inputs_outputs(inputs_to_cache, group_outputs, group_tag_str, cache_path)
+            
+        return outputs
     
-    def generate_distributed(
-        self,
-        inputs: Union[str, List[str], Dict],
-        return_raw_output: bool = False,
-    ):
+    # def generate_distributed(
+    #     self,
+    #     inputs: Union[str, List[str], Dict],
+    #     return_raw_output: bool = False,
+    # ):
         
-        generation_config = self.prepare_config_for_generation(**self.config)
-        model_inputs = self.prepare_inputs_for_generation(inputs)
-        seq_len = model_inputs['input_ids'].shape[1]
+    #     generation_config = self.prepare_config_for_generation(**self.config)
+    #     model_inputs = self.prepare_inputs_for_generation(inputs)
+    #     seq_len = model_inputs['input_ids'].shape[1]
         
-        model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
-        output = self.model.generate(
-            **model_inputs,
-            **generation_config,
-        )
-        if return_raw_output:
-            return output
-        else:
-            response = self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True)
-            return response
+    #     model_inputs = {k: v.to('cuda') for k, v in model_inputs.items()}
+    #     output = self.model.generate(
+    #         **model_inputs,
+    #         **generation_config,
+    #     )
+    #     if return_raw_output:
+    #         return output
+    #     else:
+    #         response = self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True)
+    #         return response
     
     def forward(
         self,
@@ -495,21 +560,50 @@ if __name__ == '__main__':
     os.makedirs("tmp", exist_ok=True)
     model_repo = "Qwen/Qwen2.5-Math-7B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_repo)
+    inference_transformers = InferenceTransformers(model_repo, use_auto_model=False)
+    text_list = [
+        "What is the integral of x^2?",
+        "What is the integral of x^3?",
+        "What is the integral of x^2?",
+        "What is the integral of x^3?",
+        "What is the derivative of sin(x) * e^(x^2)?",
+        "Solve the equation: 3x^2 - 5x + 2 = 0 using the quadratic formula.",
+        "Find the limit of (x^2 + 3x + 2)/(x^2 - 4) as x approaches 2.",
+        "What is the Taylor series expansion of cos(x) up to the fourth-degree term?",
+        "Evaluate the definite integral of e^(-x^2) from x = -1 to x = 1.",
+        "Simplify the expression: (2x^3 - 5x^2 + 4x - 1)/(x - 1) using polynomial division.",
+        "Find the eigenvalues of the matrix [[2, 1], [1, 2]].",
+        "What is the solution of the differential equation dy/dx = x^2 + y^2 with the initial condition y(0) = 1?",
+        "Find the Fourier transform of the function f(x) = e^(-|x|).",
+        "Evaluate the triple integral of x^2 + y^2 + z^2 over the unit sphere.",
+        "What is the determinant of the matrix [[1, 2, 3], [0, -1, 4], [5, 6, 0]]?",
+        "Find the Maclaurin series expansion of ln(1 + x) up to the fifth-degree term.",
+        "What is the Laplace transform of t*sin(2t)?",
+        "Find the general solution of the partial differential equation ∂u/∂t = k∂^2u/∂x^2.",
+        "Solve the system of linear equations: 2x + 3y - z = 5, x - 2y + 4z = -3, and 3x + y + 2z = 7.",
+        "Evaluate the improper integral of 1/(1 + x^2) from x = -∞ to x = ∞.",
+        "What is the volume of the solid generated by revolving the curve y = x^2 around the x-axis from x = 0 to x = 2?",
+        "Find the solution to the equation x^4 - 6x^2 + 8 = 0.",
+        "What is the inverse of the matrix [[2, 3], [1, 4]]?",
+        "Prove that the sum of the first n odd integers is n^2.",
+        "Calculate the gradient of the scalar field f(x, y, z) = x^2 + y^2 + z^2 at the point (1, 2, 3).",
+        "Find the arc length of the curve y = ln(x) from x = 1 to x = 3."
+    ]
+    outputs = inference_transformers.generate_non_distributed(text_list, cache_path="tmp/cache_test_3/")
+    print(outputs)
     breakpoint()
-    inference_transformers = IntervenableTransformers(model_repo, 
-                                                   use_auto_model=False)
-    breakpoint()
-    data_path = f"notebook/tmp/{model_repo.replace('/', '_')}_generated_outputs_1batch.pkl"
-    # data_path = data_path.replace("1.5B", "7B")
-    with open(data_path, "rb") as in_f:
-        attention_data_base = pickle.load(in_f)
     
-    attention_data_base['input_ids'] = attention_data_base['input_ids']
-    attention_data_base['labels'] = attention_data_base['labels']
-    default_config = InferenceTransformers.load_config('config/default_generation_config.json')
+    # data_path = f"notebook/tmp/{model_repo.replace('/', '_')}_generated_outputs_1batch.pkl"
+    # # data_path = data_path.replace("1.5B", "7B")
+    # with open(data_path, "rb") as in_f:
+    #     attention_data_base = pickle.load(in_f)
     
-    model_inputs = inference_transformers.generate(attention_data_base, 
-                                                   return_raw_output=False,
-                                                   heads_to_prune=[],
-                                                   layers_to_prune=[],)
-    print(model_inputs)
+    # attention_data_base['input_ids'] = attention_data_base['input_ids']
+    # attention_data_base['labels'] = attention_data_base['labels']
+    # default_config = InferenceTransformers.load_config('config/default_generation_config.json')
+    
+    # model_inputs = inference_transformers.generate(attention_data_base, 
+    #                                                return_raw_output=False,
+    #                                                heads_to_prune=[],
+    #                                                layers_to_prune=[],)
+    # print(model_inputs)

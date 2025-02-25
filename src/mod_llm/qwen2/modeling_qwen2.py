@@ -903,7 +903,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     position_embeddings,
                 )
             else:
-                edit_fn.current_layer = layer_idx # MODIFICATION: Added edit_fn
+                edit_fn_ = edit_fn
+                if edit_fn is not None:
+                    edit_fn.current_layer = layer_idx # MODIFICATION: Added edit_fn
+                    if layer_idx not in edit_fn.layer_list: # MODIFICATION: Added edit_fn
+                        edit_fn_ = None 
+                        
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
@@ -913,7 +918,8 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
-                    edit_fn=edit_fn if layer_idx in edit_fn.layer_list else None, # MODIFICATION: Added edit_fn
+                    edit_fn=edit_fn_, # MODIFICATION: Added edit_fn
+                    # edit_fn=edit_fn if layer_idx in edit_fn.layer_list else None, # MODIFICATION: Added edit_fn
                 )
 
             hidden_states = layer_outputs[0]
