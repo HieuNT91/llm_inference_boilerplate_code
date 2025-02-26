@@ -17,7 +17,7 @@ class InferenceTransformers:
     def __init__(self, model_repo: str, 
                  config: Dict = None, 
                  lora_path: str = None,
-                 task_type='seq_cls',
+                 task_type='causal_lm',
                  use_auto_model: bool = True,
                  use_accelerate: bool = False):
         
@@ -50,7 +50,7 @@ class InferenceTransformers:
                              model_repo: str,
                              lora_path: str = None, 
                              use_auto_model: bool = True,
-                             task_type: str = 'seq_cls',
+                             task_type: str = 'causal_lm',
                              attention_implementation: str = 'eager',
                              use_accelerate: bool = False):
         
@@ -103,6 +103,7 @@ class InferenceTransformers:
         self.tokenizer.padding_side = 'left'
         self.model.eval()
         self.device = self.model.device if not use_accelerate else self.distributed_state.device
+    
     
     @staticmethod
     def save_config(config: Dict, filepath: str = "config/default_generation_config.json"):
@@ -195,21 +196,35 @@ class InferenceTransformers:
         generation_config["eos_token_id"] = kwargs.get("eos_token_id", self.tokenizer.eos_token_id)
         return generation_config
     
-    def cache_inputs_outputs(self, inputs, outputs, group_tag, cache_path):
-        
+    def count_token(self, input_ids): # this function exclude all special tokens
+        special_token_ids = set(self.tokenizer.all_special_ids) 
+        token_lengths = []
+        for sample in input_ids:
+            length = sum(1 for token_id in sample.tolist() if token_id not in special_token_ids)
+            token_lengths.append(length)
+        return token_lengths
+    
+    def cache_inputs_outputs(self, inputs, outputs, input_token_lengths, output_token_lengths, group_tag, cache_path):
         os.makedirs(cache_path, exist_ok=True)
         file_path = os.path.join(cache_path, f"{group_tag}_cache.json")
         num_return_sequences = self.config.get("num_return_sequences", 1)
         grouped_outputs = [
             outputs[i : i + num_return_sequences] for i in range(0, len(outputs), num_return_sequences)
         ]
+        grouped_output_token_lengths = [
+            output_token_lengths[i : i + num_return_sequences] for i in range(0, len(output_token_lengths), num_return_sequences)
+        ]
         group_data = [
-            {"input": inp, "output": out} for inp, out in zip(inputs, grouped_outputs)
+            {"input": inp, 
+             "output": out, 
+             "input_token_length": inp_length,
+             "output_token_lengths": out_length} for inp, out, inp_length, out_length in zip(inputs, grouped_outputs, input_token_lengths, grouped_output_token_lengths)
         ]
         with open(file_path, "w") as file:
             json.dump(group_data, file, indent=4)
 
         print(f"Cached inputs and outputs for group '{group_tag}' saved to {cache_path}.")
+        
     
     @staticmethod
     def load_cached_outputs(cache_path, group_tag):
@@ -222,12 +237,25 @@ class InferenceTransformers:
         return None
     
     def sort_inputs(self, inputs: List[str]):
-        token_lengths = [len(tokenizer(text)["input_ids"]) for text in inputs]
-        inputs_with_lengths = zip(inputs, token_lengths)
-        sorted_inputs_with_lengths = sorted(inputs_with_lengths, key=lambda x: x[1])
-        sorted_inputs = [input_ for input_, _ in sorted_inputs_with_lengths]
-        return sorted_inputs
+        token_lengths = [len(self.tokenizer(text)["input_ids"]) for text in inputs]
+        indexed_inputs = list(enumerate(inputs))
+        # Sort by token length, keeping track of original indices
+        sorted_indexed_inputs = sorted(zip(indexed_inputs, token_lengths), key=lambda x: x[1])
+        sorted_indices = [item[0][0] for item in sorted_indexed_inputs]
+        sorted_inputs = [item[0][1] for item in sorted_indexed_inputs]
+        return sorted_inputs, sorted_indices
     
+    def generate(
+        self,
+        inputs: Union[str, List[str], Dict],
+        cache_path: str,
+    ) -> List[str]:
+        if self.is_distributed_generation:
+            raise NotImplementedError("Distributed generation not supported yet.")
+            return self.generate_distributed(inputs, cache_path)
+        else:
+            return self.generate_non_distributed(inputs, cache_path)
+        
     def generate_non_distributed(
         self,
         inputs: Union[str, List[str], Dict],
@@ -267,11 +295,13 @@ class InferenceTransformers:
             cached_outputs = self.load_cached_outputs(cache_path, group_tag_str)
             if cached_outputs is not None:
                 print(f"Loaded cached outputs for {group_tag_str}.")
-                outputs.extend(cached_outputs)
+                outputs.extend([cached_output for sublist in cached_outputs for cached_output in sublist])
                 continue  # Skip generation for this group
 
             group_outputs = []
             inputs_to_cache = []
+            input_token_lengths = []
+            output_token_lengths = []
             for batch in input_batches:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 seq_len = batch['input_ids'].shape[1]
@@ -279,11 +309,18 @@ class InferenceTransformers:
                     **batch,
                     **generation_config,
                 )
+                input_token_lengths.extend(self.count_token(batch['input_ids']))
+                output_token_lengths.extend(self.count_token(output[:, seq_len:]))
                 inputs_to_cache.extend(self.tokenizer.batch_decode(batch['input_ids'], skip_special_tokens=True))
                 group_outputs.extend(self.tokenizer.batch_decode(output[:, seq_len:], skip_special_tokens=True))
 
             outputs.extend(group_outputs)
-            self.cache_inputs_outputs(inputs_to_cache, group_outputs, group_tag_str, cache_path)
+            self.cache_inputs_outputs(inputs=inputs_to_cache, 
+                                      outputs=group_outputs, 
+                                      input_token_lengths=input_token_lengths,
+                                      output_token_lengths=output_token_lengths,
+                                      group_tag=group_tag_str, 
+                                      cache_path=cache_path)
             
         return outputs
     
@@ -359,7 +396,7 @@ class IntervenableTransformers(InferenceTransformers):
     def __init__(self, model_repo: str, 
                  config: Dict = None, 
                  lora_path: str = None,
-                 task_type='seq_cls',
+                 task_type='causal_lm',
                  use_auto_model: bool = True,
                  use_accelerate: bool = False):
         super().__init__(model_repo, 
@@ -558,10 +595,10 @@ class IntervenableTransformers(InferenceTransformers):
 if __name__ == '__main__':
     from prompt_utils import load_all_prompts, get_prompt
     import pandas as pd 
-    model_repo = "Qwen/Qwen2.5-Math-7B-Instruct"
-    all_prompts = load_all_prompts("src/prompts")
-    prompt_template = get_prompt(all_prompts, "yue", "qwen_math", "vanilla_instruct")['prompt']
-    
+    model_repo = "Qwen/Qwen2.5-Math-1.5B-Instruct"
+    # all_prompts = load_all_prompts("src/prompts")
+    # prompt_template = get_prompt(all_prompts, "yue", "qwen_math", "vanilla_instruct")['prompt']
+    prompt_template = "<|im_start|>system\nPlease reason step by step, and put your final answer within \\boxed{{}}.<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
     test_df = pd.read_excel("datasets/YueData/yue_test.xlsx")
     train_df = pd.read_excel("datasets/YueData/yue_train.xlsx")
     df = pd.concat([train_df, test_df], ignore_index=True)
@@ -570,21 +607,24 @@ if __name__ == '__main__':
     text_list = [prompt_template.format(question=text) for text in text_list]
     
     tokenizer = AutoTokenizer.from_pretrained(model_repo)
-    inference_transformers = InferenceTransformers(model_repo, use_auto_model=False)
-    sorted_text_list = inference_transformers.sort_inputs(text_list)
-    outputs = inference_transformers.generate_non_distributed(sorted_text_list, cache_path="tmp/yue_best_of_4/")
+    inference_transformers = InferenceTransformers(model_repo, use_auto_model=True)
+    sorted_text_list, sorted_indices = inference_transformers.sort_inputs(text_list)
+
     
-    num_return_sequences = inference_transformers.config['num_return_sequences']  # Number of generated answers per question
+    num_return_sequences = inference_transformers.config['num_return_sequences']  
+    max_new_tokens = inference_transformers.config['max_new_tokens']  
+    outputs = inference_transformers.generate_non_distributed(sorted_text_list, cache_path=f"tmp/yue_best_of_{num_return_sequences}_{max_new_tokens}_1.5B_/")
     grouped_outputs = [
         outputs[i : i + num_return_sequences] for i in range(0, len(outputs), num_return_sequences)
     ]
-
+    reverse_indices = [0] * len(sorted_indices)
+    for pos, original_idx in enumerate(sorted_indices):
+        reverse_indices[original_idx] = pos
+    ordered_groups = [grouped_outputs[reverse_indices[i]] for i in range(len(df))]
     for i in range(num_return_sequences):
-        df[f"answer {i+1}"] = [group[i] for group in grouped_outputs]
-
-    output_file = "datasets/YueData/yue_extended.csv"
+        df[f"answer {i+1}"] = [group[i] for group in ordered_groups]
+    output_file = f"tmp/yue_best_of_{num_return_sequences}_{max_new_tokens}/yue_extended_1.5B.csv"
     df.to_csv(output_file, index=False)
-
     print(f"Extended CSV file saved to: {output_file}")
     # text_list = [
     #     "What is the integral of x^2?",

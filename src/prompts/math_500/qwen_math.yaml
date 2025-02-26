@@ -1,10 +1,7 @@
 - name: "vanilla_instruct"
   description: "No COT, No few-shot examples, just plain simple prompt to use with instruct model"
   prompt: |
-    '<|im_start|>system\nSolve the given math problem.<|im_end|>
-    <|im_start|>user
-    {problem}
-    <|im_end|>\n<|im_start|>assistant\n'
+    '<|im_start|>system\nPlease reason step by step, and put your final answer within \\boxed{}.<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n'
 
 - name: "vanilla_base"
   description: "No few-shot examples, just plain simple prompt to use with base model"
