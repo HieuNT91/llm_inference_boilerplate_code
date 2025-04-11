@@ -5,4 +5,3 @@ pandas
 scikit-learn
 numpy
 peft
-flash-attn
