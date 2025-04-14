@@ -6,7 +6,7 @@ from concurrent.futures import TimeoutError
 
 from grader import *
 
-from parser import *
+from .parser import *
 from utils import load_jsonl
 from python_executor import PythonExecutor
 
