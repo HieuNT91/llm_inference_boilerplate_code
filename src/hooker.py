@@ -1,5 +1,4 @@
 import os 
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from typing import Union, List, Dict
 import torch 
 import numpy as np

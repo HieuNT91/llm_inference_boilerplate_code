@@ -1,6 +1,6 @@
 import pandas as pd 
 from prompts import qwen_math_instruct_prompt_template
-from transformers_utils import InferenceTransformers
+from inference_utils import InferenceTransformers
 
 model_repo = "Qwen/Qwen2.5-Math-1.5B-Instruct"
 model_str = model_repo.split("/")[-1].lower().replace("-", "_")

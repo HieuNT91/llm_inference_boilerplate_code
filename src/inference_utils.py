@@ -7,7 +7,7 @@ import transformers
 import numpy as np
 from peft import PeftModel
 import os 
-# from src.hooker import BaseHooker
+from src.hooker import BaseHooker
 
 import pickle
 
@@ -145,7 +145,6 @@ class CacheManager:
         all_topk_tokens = self.cache_data["topk_tokens"][:total_inputs]
 
         return all_responses, all_topk_probs, all_topk_tokens
-        
         
 
 class InferenceEngine:
