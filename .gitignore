@@ -1,5 +1,8 @@
 datasets/
 tmp/
+experiments/temperature_tuning/figures
+cache/
+data/
 log/
 # Byte-compiled / optimized / DLL files
 __pycache__/
