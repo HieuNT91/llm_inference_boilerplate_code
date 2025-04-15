@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=2 python3 experiments/temperature_tuning/run.py --batch_size 4 --input_start 0 --input_end 2500

@@ -5,9 +5,9 @@
     "top_k": 50,
     "top_p": 0.95,
     "repetition_penalty": 1.0,
-    "num_return_sequences": 8,
+    "num_return_sequences": 1,
     "use_cache": true,
-    "do_sample": true,
+    "do_sample": false,
     "cache_interval": 4, 
     "batch_size_per_device": 4
 }
